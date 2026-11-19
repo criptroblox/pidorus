@@ -1,5 +1,5 @@
 --[[
-    MM2 Trade Supreme Value Scanner (Debug + Quantity Fix)
+    MM2 Trade Supreme Value Scanner (Async + Debug Mode)
 --]]
 
 local Players = game:GetService("Players")
@@ -7,20 +7,23 @@ local HttpService = game:GetService("HttpService")
 local StarterGui = game:GetService("StarterGui")
 local LocalPlayer = Players.LocalPlayer
 
--- 🔑 ВСТАВЬТЕ СЮДА НОВЫЙ КЛЮЧ (старый мог быть заблокирован из-за публикации в чате)
-local API_KEY = "rbx_aa58f767fc32b5ea3b44ad89bee8aa079cf66a90b0d6f13b"
+-- 🔑 ВАЖНО: Старый ключ, скорее всего, уже мертв. 
+-- Сгенерируйте НОВЫЙ на rblxvalue.com/developer и вставьте сюда:
+local API_KEY = "rbx_aa58f767fc32b5ea3b44ad89bee8aa079cf66a90b0d6f13b" 
+
 local BASE_URL = "https://api.rblxvalue.com/v2/items/"
 local cache = {}
+local pendingRequests = {} -- Защита от дублирования запросов
 
 local HttpFn = request or http_request or (syn and syn.request) or (delta and delta.request)
-if not HttpFn then return end
-
--- Логирование в консоль
-local function log(...)
-    print("[MM2 Tracker]", ...)
+if not HttpFn then 
+    return StarterGui:SetCore("SendNotification", {Title = "Ошибка", Text = "Нет HTTP функций", Duration = 5})
 end
 
--- Безопасное получение родителя для GUI
+local function log(...)
+    print("[MM2 Tracker] ", ...)
+end
+
 local function GetSafeGuiParent()
     local success, hui = pcall(function() return gethui() end)
     if success and hui then return hui end
@@ -28,65 +31,61 @@ local function GetSafeGuiParent()
 end
 local GUI_PARENT = GetSafeGuiParent()
 
--- Синхронный HTTP-запрос
-local function SyncRequest(url)
-    local res = nil
-    local finished = false
+-- Асинхронный запрос (не вешает игру)
+local function FetchItemAsync(itemName, callback)
+    if not itemName or itemName == "" or itemName == "???" then return end
+    
+    itemName = itemName:match("^%s*(.-)%s*$") -- Очистка пробелов
+    
+    -- Если есть в кэше, отдаем сразу
+    if cache[itemName] then
+        callback(cache[itemName])
+        return
+    end
+    
+    -- Если запрос уже отправлен, ждем
+    if pendingRequests[itemName] then return end
+    pendingRequests[itemName] = true
+
     task.spawn(function()
-        local ok, result = pcall(HttpFn, {
+        local slug = string.lower(string.gsub(itemName, "[%s%p]+", "-"))
+        local url = BASE_URL .. slug
+        
+        local ok, res = pcall(HttpFn, {
             Url = url,
             Method = "GET",
             Headers = { ["X-Api-Key"] = API_KEY }
         })
-        if ok then res = result end
-        finished = true
-    end)
-    
-    local timeout = tick() + 5
-    while not finished and tick() < timeout do task.wait(0.05) end
-    return res
-end
 
--- Запрос цены с защитой от ошибок API
-local function FetchItemData(itemName)
-    if not itemName or itemName == "" or itemName == "???" then return nil end
-    
-    -- Очищаем название от лишних пробелов по краям
-    itemName = itemName:match("^%s*(.-)%s*$")
+        if ok and res and res.StatusCode == 200 and res.Body then
+            local decodeOk, json = pcall(function() return HttpService:JSONDecode(res.Body) end)
+            if decodeOk and json and json.item then
+                local item = json.item
+                local val = item.value_source_b or item.value or 0
+                
+                -- Если Supreme пустой, берем MM2Values
+                if val == 0 then val = item.value_source_a or 0 end
 
-    if cache[itemName] and (tick() - cache[itemName].time < 300) then
-        return cache[itemName].data
-    end
-
-    -- Генерируем слаг (Chroma Evergreen -> chroma-evergreen)
-    local slug = string.lower(string.gsub(itemName, "[%s%p]+", "-"))
-    log("Запрос к API по слагу:", slug)
-    
-    local res = SyncRequest(BASE_URL .. slug)
-    
-    if res and res.StatusCode == 200 and res.Body then
-        local ok, json = pcall(function() return HttpService:JSONDecode(res.Body) end)
-        if ok and json and json.item then
-            local item = json.item
-            local val = item.value_source_b or item.value or 0
-            
-            -- Если Supreme пустой (0), берем MM2Values
-            if val == 0 then 
-                val = item.value_source_a or 0 
-                log(" -> Цена Supreme не найдена, взята цена MM2Values:", val)
+                local data = {
+                    Name = item.name,
+                    Value = val,
+                    Stability = item.stability or "Stable"
+                }
+                cache[itemName] = data
+                log("✅ УСПЕХ:", itemName, "| Цена:", val, "| Тренд:", data.Stability)
+                callback(data)
+            else
+                log("❌ ОШИБКА JSON для:", itemName, "| Ответ:", res.Body)
             end
-
-            local data = {
-                Name = item.name,
-                Value = val,
-                Stability = item.stability or "Stable"
-            }
-            cache[itemName] = { data = data, time = tick() }
-            return data
+        else
+            -- Логируем ошибку API (например, 401 Unauthorized или 429 Too Many Requests)
+            local status = res and res.StatusCode or "НЕТ ОТВЕТА"
+            local body = res and res.Body or "пусто"
+            log("❌ ОШИБКА API:", itemName, "| Код:", status, "| Ответ:", body)
         end
-    end
-    log("❌ Ошибка API или предмет не найден:", itemName)
-    return nil
+        
+        pendingRequests[itemName] = nil
+    end)
 end
 
 local function FindTradeGui(playerGui)
@@ -119,23 +118,17 @@ local function GetOffers(tradeGui)
     return yourOffer, theirOffer
 end
 
--- ГЛУБОКИЙ поиск названия (включая скрытые элементы и атрибуты)
+-- Умный поиск названия (убирает мусорные тексты и числа)
 local function GetSlotName(slot)
     if not slot then return nil end
 
-    -- 1. Атрибуты
     local attr = slot:GetAttribute("ItemName") or slot:GetAttribute("Name")
     if attr then return tostring(attr) end
 
-    -- 2. StringValues
-    local val = slot:FindFirstChild("ItemName") or slot:FindFirstChildOfClass("StringValue")
-    if val and val:IsA("StringValue") and val.Value ~= "" then return val.Value end
-
-    -- 3. Текстовые метки (включая невидимые)
     for _, v in pairs(slot:GetDescendants()) do
         if v:IsA("TextLabel") and v.Text ~= "" and v.Text ~= "???" and v.Text ~= "Empty" then
-            -- Игнорируем числа (это может быть количество) и слишком короткие тексты
-            if not v.Text:match("^[xX]?%d+$") and #v.Text > 2 then
+            -- Игнорируем текст, если это просто число (например, количество)
+            if not v.Text:match("^[xX]?%s*%d+$") and #v.Text > 2 then
                 return v.Text
             end
         end
@@ -143,7 +136,6 @@ local function GetSlotName(slot)
     return nil
 end
 
--- Поиск количества (x5 или просто 5)
 local function GetQuantity(slot)
     for _, v in pairs(slot:GetDescendants()) do
         if v:IsA("TextLabel") then
@@ -151,30 +143,52 @@ local function GetQuantity(slot)
             if match then return tonumber(match) end
         end
     end
-    return 1 -- По умолчанию 1 штука
+    return 1
 end
 
-local function ScanSide(folder)
-    if not folder then return 0, {} end
+-- Сканирование без ожидания API
+local function ScanSide(folder, panelName)
+    if not folder then return end
     local total = 0
-    local itemsFound = {}
-    
+    local trends = { Rising = 0, Dropping = 0 }
+    local foundItems = {}
+
+    -- Сначала собираем все слоты и названия
     for _, child in pairs(folder:GetDescendants()) do
         if (child:IsA("Frame") or child:IsA("ImageButton") or child:IsA("ViewportFrame")) and child.Visible then
             local name = GetSlotName(child)
             if name then
                 local qty = GetQuantity(child)
-                local itemData = FetchItemData(name)
-                if itemData then
-                    local itemTotal = itemData.Value * qty
-                    total = total + itemTotal
-                    table.insert(itemsFound, itemData)
-                    log("✅ Предмет:", name, "| Кол-во:", qty, "| Цена:", itemData.Value, "| Итог:", itemTotal)
-                end
+                table.insert(foundItems, {name = name, qty = qty, slot = child})
             end
         end
     end
-    return total, itemsFound
+
+    -- Если предметов нет, обнуляем
+    if #foundItems == 0 then
+        return 0, 0, 0
+    end
+
+    -- Обрабатываем каждый предмет (мгновенно из кэша, или в фоне)
+    for _, itemInfo in pairs(foundItems) do
+        local itemName = itemInfo.name
+        local qty = itemInfo.qty
+        
+        FetchItemAsync(itemName, function(data)
+            local itemTotal = data.Value * qty
+            total = total + itemTotal
+            
+            if data.Stability == "Rising" then trends.Rising = trends.Rising + 1
+            elseif data.Stability == "Dropping" then trends.Dropping = trends.Dropping + 1 end
+            
+            -- Обновляем UI после каждого полученного предмета
+            local trendIcon = "➖"
+            if trends.Rising > trends.Dropping then trendIcon = "📈"
+            elseif trends.Dropping > trends.Rising then trendIcon = "📉" end
+            
+            panelName.Text = string.format("Offer: %d val %s", total, trendIcon)
+        end)
+    end
 end
 
 -- Интерфейс
@@ -194,7 +208,7 @@ myPanel.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
 myPanel.TextColor3 = Color3.fromRGB(255, 255, 255)
 myPanel.Font = Enum.Font.GothamBold
 myPanel.TextSize = 15
-myPanel.Text = "Your Offer: ..."
+myPanel.Text = "Your Offer: ожидание..."
 myPanel.Parent = gui
 Instance.new("UICorner", myPanel).CornerRadius = UDim.new(0, 8)
 
@@ -206,13 +220,15 @@ theirPanel.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
 theirPanel.TextColor3 = Color3.fromRGB(255, 255, 255)
 theirPanel.Font = Enum.Font.GothamBold
 theirPanel.TextSize = 15
-theirPanel.Text = "Their Offer: ..."
+theirPanel.Text = "Their Offer: ожидание..."
 theirPanel.Parent = gui
 Instance.new("UICorner", theirPanel).CornerRadius = UDim.new(0, 8)
 
--- Цикл видимости
+-- Мониторинг
 task.spawn(function()
     local lastSeenTime = 0
+    local lastScanTime = 0
+    
     while task.wait(0.2) do
         local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
         local tradeGui = playerGui and FindTradeGui(playerGui)
@@ -221,6 +237,16 @@ task.spawn(function()
             lastSeenTime = tick()
             myPanel.Visible = true
             theirPanel.Visible = true
+            
+            -- Сканируем не чаще, чем раз в 1.5 секунды (чтобы не спамить API)
+            if tick() - lastScanTime > 1.5 then
+                lastScanTime = tick()
+                local yourOffer, theirOffer = GetOffers(tradeGui)
+                if yourOffer and theirOffer then
+                    ScanSide(yourOffer, myPanel)
+                    ScanSide(theirOffer, theirPanel)
+                end
+            end
         else
             if tick() - lastSeenTime > 2 then
                 myPanel.Visible = false
@@ -230,43 +256,4 @@ task.spawn(function()
     end
 end)
 
--- Цикл сканирования
-task.spawn(function()
-    while task.wait(2) do -- Раз в 2 секунды, чтобы не превышать лимит API
-        pcall(function()
-            local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
-            local tradeGui = playerGui and FindTradeGui(playerGui)
-            if not tradeGui then return end
-            
-            local yourOffer, theirOffer = GetOffers(tradeGui)
-            if not yourOffer or not theirOffer then return end
-
-            log("--- Начинаю сканирование трейда ---")
-            local myTotal, myItems = ScanSide(yourOffer)
-            local theirTotal, theirItems = ScanSide(theirOffer)
-
-            local function getTrend(items)
-                if not items or #items == 0 then return "➖" end
-                local r, d = 0, 0
-                for _, i in pairs(items) do
-                    if i.Stability == "Rising" then r = r + 1
-                    elseif i.Stability == "Dropping" then d = d + 1 end
-                end
-                if r > d then return "📈" elseif d > r then return "📉" end
-                return "➖"
-            end
-
-            myPanel.Text = string.format("Your Offer: %d value %s", myTotal, getTrend(myItems))
-            theirPanel.Text = string.format("Their Offer: %d value %s", theirTotal, getTrend(theirItems))
-            
-            if myTotal > theirTotal and theirTotal > 0 then
-                myPanel.BackgroundColor3 = Color3.fromRGB(40, 120, 40)
-            elseif theirTotal > myTotal and myTotal > 0 then
-                theirPanel.BackgroundColor3 = Color3.fromRGB(40, 120, 40)
-            else
-                myPanel.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
-                theirPanel.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
-            end
-        end)
-    end
-end)
+StarterGui:SetCore("SendNotification", {Title = "MM2 Tracker", Text = "Асинхронный режим запущен. Смотрите консоль (F9)!", Duration = 5})
