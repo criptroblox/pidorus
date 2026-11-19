@@ -1,0 +1,157 @@
+-- ========================================================
+-- MM2 Supreme Values Tracker для Delta Executor
+-- ========================================================
+
+-- ВСТАВЬТЕ СЮДА ВАШ НОВЫЙ API-КЛЮЧ RBLXVALUE (после перегенерации старого!)
+local API_KEY = "rbx_aa58f767fc32b5ea3b44ad89bee8aa079cf66a90b0d6f13b"
+local BASE_URL = "https://api.rblxvalue.com/v2/items/"
+
+-- Универсальный поиск HTTP-функции в Delta (request или http_request)
+local HttpFn = request or http_request or (syn and syn.request) or (delta and delta.request) or (fluxus and fluxus.request)
+if not HttpFn then
+    return game:GetService("StarterGui"):SetCore("SendNotification", {
+        Title = "Ошибка Executor",
+        Text = "Delta не поддерживает HTTP-запросы в этой версии.",
+        Duration = 5
+    })
+end
+
+-- Функция запроса данных с учетом таймаута (Delta иногда зависает на некоторых доменах)
+local function SafeHttpRequest(options)
+    local response = nil
+    local done = false
+    
+    task.spawn(function()
+        local success, res = pcall(HttpFn, options)
+        if success then response = res end
+        done = true
+    end)
+    
+    local timeout = tick() + 8 -- 8 секунд на ответ
+    while not done and tick() < timeout do
+        task.wait(0.1)
+    end
+    
+    return response
+end
+
+-- Функция получения информации о предмете
+local function GetItemData(itemSlug)
+    local url = BASE_URL .. string.lower(itemSlug)
+    
+    local res = SafeHttpRequest({
+        Url = url,
+        Method = "GET",
+        Headers = {
+            ["X-Api-Key"] = API_KEY
+        }
+    })
+    
+    if res and res.StatusCode == 200 and res.Body then
+        local decodeSuccess, data = pcall(function()
+            return game:GetService("HttpService"):JSONDecode(res.Body)
+        end)
+        
+        if decodeSuccess and data and data.item then
+            local item = data.item
+            return {
+                Name = item.name,
+                Value = item.value_source_b or item.value_source_a or 0, -- Цена Supreme Values
+                Stability = item.stability or "Stable", -- "Rising", "Dropping", "Stable"
+                Demand = item.demand or "N/A"
+            }
+        end
+    end
+    return nil
+end
+
+-- Создание компактного экранного интерфейса (GUI) для мобильного Delta
+local CoreGui = game:GetService("CoreGui")
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "MM2_SupremeTracker"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.Parent = (gethui and gethui()) or CoreGui
+
+local MainFrame = Instance.new("Frame")
+MainFrame.Size = UDim2.new(0, 280, 0, 140)
+MainFrame.Position = UDim2.new(0.5, -140, 0.2, 0)
+MainFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+MainFrame.BorderSizePixel = 0
+MainFrame.Active = true
+MainFrame.Draggable = true -- Перетаскивание пальцем
+MainFrame.Parent = ScreenGui
+
+local UICorner = Instance.new("UICorner")
+UICorner.CornerRadius = UDim.new(0, 10)
+UICorner.Parent = MainFrame
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, 0, 0, 30)
+Title.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+Title.Text = " MM2 Supreme Checker"
+Title.TextColor3 = Color3.fromRGB(255, 255, 255)
+Title.Font = Enum.Font.GothamBold
+Title.TextSize = 14
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.Parent = MainFrame
+
+local ItemNameLbl = Instance.new("TextLabel")
+ItemNameLbl.Size = UDim2.new(1, -20, 0, 25)
+ItemNameLbl.Position = UDim2.new(0, 10, 0, 35)
+ItemNameLbl.BackgroundTransparency = 1
+ItemNameLbl.Text = "Загрузка..."
+ItemNameLbl.TextColor3 = Color3.fromRGB(200, 200, 200)
+ItemNameLbl.Font = Enum.Font.GothamMedium
+ItemNameLbl.TextSize = 14
+ItemNameLbl.TextXAlignment = Enum.TextXAlignment.Left
+ItemNameLbl.Parent = MainFrame
+
+local ValueLbl = Instance.new("TextLabel")
+ValueLbl.Size = UDim2.new(1, -20, 0, 30)
+ValueLbl.Position = UDim2.new(0, 10, 0, 60)
+ValueLbl.BackgroundTransparency = 1
+ValueLbl.Text = "-- Value"
+ValueLbl.TextColor3 = Color3.fromRGB(255, 255, 255)
+ValueLbl.Font = Enum.Font.GothamBold
+ValueLbl.TextSize = 20
+ValueLbl.TextXAlignment = Enum.TextXAlignment.Left
+ValueLbl.Parent = MainFrame
+
+local TrendLbl = Instance.new("TextLabel")
+TrendLbl.Size = UDim2.new(1, -20, 0, 25)
+TrendLbl.Position = UDim2.new(0, 10, 0, 100)
+TrendLbl.BackgroundTransparency = 1
+TrendLbl.Text = "Тренд: --"
+TrendLbl.Font = Enum.Font.GothamMedium
+TrendLbl.TextSize = 15
+TrendLbl.TextXAlignment = Enum.TextXAlignment.Left
+TrendLbl.Parent = MainFrame
+
+-- Обновление интерфейса и цвета значка тренда
+local function UpdateUI(itemSlug)
+    local data = GetItemData(itemSlug)
+    if not data then
+        ItemNameLbl.Text = "Ошибка / Предмет не найден"
+        ValueLbl.Text = "--"
+        TrendLbl.Text = "Нет данных"
+        return
+    end
+    
+    ItemNameLbl.Text = tostring(data.Name)
+    ValueLbl.Text = tostring(data.Value) .. " Value"
+    
+    if data.Stability == "Rising" then
+        TrendLbl.Text = "📈 РАСТЕТ"
+        TrendLbl.TextColor3 = Color3.fromRGB(0, 255, 100)
+    elseif data.Stability == "Dropping" then
+        TrendLbl.Text = "📉 ПАДАЕТ"
+        TrendLbl.TextColor3 = Color3.fromRGB(255, 60, 60)
+    else
+        TrendLbl.Text = "➖ СТАБИЛЕН"
+        TrendLbl.TextColor3 = Color3.fromRGB(200, 200, 200)
+    end
+end
+
+-- 📌 Измените "chroma-evergreen" на название нужного вам предмета (слаг)
+-- Примеры: "chroma-evergreen", "batwing", "america", "gingerscope"
+UpdateUI("chroma-evergreen")
