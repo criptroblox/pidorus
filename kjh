@@ -1,6 +1,5 @@
 --[[
-    MM2 Trade Supreme Value Scanner (Mobile Stable Fix)
-    Исправлено мигание панелей и добавлен гибкий поиск элементов трейда.
+    MM2 Trade Supreme Value Scanner (Debug + Quantity Fix)
 --]]
 
 local Players = game:GetService("Players")
@@ -8,13 +7,18 @@ local HttpService = game:GetService("HttpService")
 local StarterGui = game:GetService("StarterGui")
 local LocalPlayer = Players.LocalPlayer
 
--- 🔑 Ключ API
+-- 🔑 ВСТАВЬТЕ СЮДА НОВЫЙ КЛЮЧ (старый мог быть заблокирован из-за публикации в чате)
 local API_KEY = "rbx_aa58f767fc32b5ea3b44ad89bee8aa079cf66a90b0d6f13b"
 local BASE_URL = "https://api.rblxvalue.com/v2/items/"
 local cache = {}
 
 local HttpFn = request or http_request or (syn and syn.request) or (delta and delta.request)
 if not HttpFn then return end
+
+-- Логирование в консоль
+local function log(...)
+    print("[MM2 Tracker]", ...)
+end
 
 -- Безопасное получение родителя для GUI
 local function GetSafeGuiParent()
@@ -24,7 +28,7 @@ local function GetSafeGuiParent()
 end
 local GUI_PARENT = GetSafeGuiParent()
 
--- Синхронный HTTP-запрос с таймаутом
+-- Синхронный HTTP-запрос
 local function SyncRequest(url)
     local res = nil
     local finished = false
@@ -39,46 +43,52 @@ local function SyncRequest(url)
     end)
     
     local timeout = tick() + 5
-    while not finished and tick() < timeout do
-        task.wait(0.05)
-    end
+    while not finished and tick() < timeout do task.wait(0.05) end
     return res
 end
 
--- Запрос цены
+-- Запрос цены с защитой от ошибок API
 local function FetchItemData(itemName)
     if not itemName or itemName == "" or itemName == "???" then return nil end
+    
+    -- Очищаем название от лишних пробелов по краям
+    itemName = itemName:match("^%s*(.-)%s*$")
+
     if cache[itemName] and (tick() - cache[itemName].time < 300) then
         return cache[itemName].data
     end
 
-    local slug = string.lower(string.gsub(itemName, "[%s%p]", "-"))
+    -- Генерируем слаг (Chroma Evergreen -> chroma-evergreen)
+    local slug = string.lower(string.gsub(itemName, "[%s%p]+", "-"))
+    log("Запрос к API по слагу:", slug)
+    
     local res = SyncRequest(BASE_URL .. slug)
     
-    if not res or res.StatusCode ~= 200 then
-        local fallback = SyncRequest("https://api.rblxvalue.com/v2/items?search=" .. HttpService:UrlEncode(itemName) .. "&limit=1")
-        if fallback and fallback.StatusCode == 200 then res = fallback end
-    end
-
     if res and res.StatusCode == 200 and res.Body then
         local ok, json = pcall(function() return HttpService:JSONDecode(res.Body) end)
-        if ok and json then
-            local item = json.item or (json.items and json.items[1])
-            if item then
-                local data = {
-                    Name = item.name,
-                    Value = item.value_source_b or item.value or 0,
-                    Stability = item.stability or "Stable"
-                }
-                cache[itemName] = { data = data, time = tick() }
-                return data
+        if ok and json and json.item then
+            local item = json.item
+            local val = item.value_source_b or item.value or 0
+            
+            -- Если Supreme пустой (0), берем MM2Values
+            if val == 0 then 
+                val = item.value_source_a or 0 
+                log(" -> Цена Supreme не найдена, взята цена MM2Values:", val)
             end
+
+            local data = {
+                Name = item.name,
+                Value = val,
+                Stability = item.stability or "Stable"
+            }
+            cache[itemName] = { data = data, time = tick() }
+            return data
         end
     end
+    log("❌ Ошибка API или предмет не найден:", itemName)
     return nil
 end
 
--- Гибкий поиск окна трейда (ищет любой GUI со словом "trade")
 local function FindTradeGui(playerGui)
     for _, gui in pairs(playerGui:GetChildren()) do
         if gui:IsA("ScreenGui") and string.find(string.lower(gui.Name), "trade") and gui.Enabled then
@@ -88,7 +98,6 @@ local function FindTradeGui(playerGui)
     return nil
 end
 
--- Гибкий поиск папок с офферами
 local function GetOffers(tradeGui)
     local yourOffer, theirOffer
     local container = tradeGui:FindFirstChild("Container")
@@ -98,7 +107,6 @@ local function GetOffers(tradeGui)
         theirOffer = trade:FindFirstChild("TheirOffer")
     end
     
-    -- Если стандартные пути не найдены, ищем по всему интерфейсу
     if not yourOffer or not theirOffer then
         for _, v in pairs(tradeGui:GetDescendants()) do
             if v:IsA("GuiObject") then
@@ -111,40 +119,57 @@ local function GetOffers(tradeGui)
     return yourOffer, theirOffer
 end
 
--- Извлечение названия предмета из слота
+-- ГЛУБОКИЙ поиск названия (включая скрытые элементы и атрибуты)
 local function GetSlotName(slot)
     if not slot then return nil end
-    -- Ищем явные метки
-    local lbl = slot:FindFirstChild("ItemName") 
-        or slot:FindFirstChild("Name") 
-        or slot:FindFirstChild("ItemNameLabel")
-    if lbl and lbl:IsA("TextLabel") and lbl.Text ~= "" and lbl.Text ~= "???" then
-        return lbl.Text
-    end
-    -- Резервный поиск по всем текстовым меткам внутри слота
+
+    -- 1. Атрибуты
+    local attr = slot:GetAttribute("ItemName") or slot:GetAttribute("Name")
+    if attr then return tostring(attr) end
+
+    -- 2. StringValues
+    local val = slot:FindFirstChild("ItemName") or slot:FindFirstChildOfClass("StringValue")
+    if val and val:IsA("StringValue") and val.Value ~= "" then return val.Value end
+
+    -- 3. Текстовые метки (включая невидимые)
     for _, v in pairs(slot:GetDescendants()) do
-        if v:IsA("TextLabel") and v.Text ~= "" and v.Text ~= "???" and v.Text ~= "Empty" and not v.Text:match("^%d+$") then
-            return v.Text
+        if v:IsA("TextLabel") and v.Text ~= "" and v.Text ~= "???" and v.Text ~= "Empty" then
+            -- Игнорируем числа (это может быть количество) и слишком короткие тексты
+            if not v.Text:match("^[xX]?%d+$") and #v.Text > 2 then
+                return v.Text
+            end
         end
     end
     return nil
 end
 
--- Сканирование стороны
+-- Поиск количества (x5 или просто 5)
+local function GetQuantity(slot)
+    for _, v in pairs(slot:GetDescendants()) do
+        if v:IsA("TextLabel") then
+            local match = v.Text:match("^[xX]?%s*(%d+)$")
+            if match then return tonumber(match) end
+        end
+    end
+    return 1 -- По умолчанию 1 штука
+end
+
 local function ScanSide(folder)
     if not folder then return 0, {} end
     local total = 0
     local itemsFound = {}
     
     for _, child in pairs(folder:GetDescendants()) do
-        -- Ищем слоты (обычно это Frame или ImageButton)
-        if (child:IsA("Frame") or child:IsA("ImageButton")) and child.Visible then
+        if (child:IsA("Frame") or child:IsA("ImageButton") or child:IsA("ViewportFrame")) and child.Visible then
             local name = GetSlotName(child)
             if name then
+                local qty = GetQuantity(child)
                 local itemData = FetchItemData(name)
                 if itemData then
-                    total = total + itemData.Value
+                    local itemTotal = itemData.Value * qty
+                    total = total + itemTotal
                     table.insert(itemsFound, itemData)
+                    log("✅ Предмет:", name, "| Кол-во:", qty, "| Цена:", itemData.Value, "| Итог:", itemTotal)
                 end
             end
         end
@@ -152,7 +177,7 @@ local function ScanSide(folder)
     return total, itemsFound
 end
 
--- Создание интерфейса
+-- Интерфейс
 local old = GUI_PARENT:FindFirstChild("MM2_TradeScanner")
 if old then old:Destroy() end
 
@@ -185,8 +210,7 @@ theirPanel.Text = "Their Offer: ..."
 theirPanel.Parent = gui
 Instance.new("UICorner", theirPanel).CornerRadius = UDim.new(0, 8)
 
--- 1. ЦИКЛ ВИДИМОСТИ (Защита от мигания)
--- Если трейд пропадает из виду на мгновение (игра обновляет UI), мы ждем 2 секунды перед скрытием.
+-- Цикл видимости
 task.spawn(function()
     local lastSeenTime = 0
     while task.wait(0.2) do
@@ -206,9 +230,9 @@ task.spawn(function()
     end
 end)
 
--- 2. ЦИКЛ СКАНИРОВАНИЯ (Асинхронный, чтобы не вешать игру)
+-- Цикл сканирования
 task.spawn(function()
-    while task.wait(1.5) do
+    while task.wait(2) do -- Раз в 2 секунды, чтобы не превышать лимит API
         pcall(function()
             local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
             local tradeGui = playerGui and FindTradeGui(playerGui)
@@ -217,6 +241,7 @@ task.spawn(function()
             local yourOffer, theirOffer = GetOffers(tradeGui)
             if not yourOffer or not theirOffer then return end
 
+            log("--- Начинаю сканирование трейда ---")
             local myTotal, myItems = ScanSide(yourOffer)
             local theirTotal, theirItems = ScanSide(theirOffer)
 
@@ -245,9 +270,3 @@ task.spawn(function()
         end)
     end
 end)
-
-StarterGui:SetCore("SendNotification", {
-    Title = "Supreme Tracker",
-    Text = "Скрипт стабилен. Откройте трейд.",
-    Duration = 3
-})
