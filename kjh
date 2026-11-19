@@ -9,7 +9,7 @@ local LocalPlayer = Players.LocalPlayer
 
 -- 🔑 ВАЖНО: Старый ключ, скорее всего, уже мертв. 
 -- Сгенерируйте НОВЫЙ на rblxvalue.com/developer и вставьте сюда:
-local API_KEY = "rbx_aa58f767fc32b5ea3b44ad89bee8aa079cf66a90b0d6f13b" 
+local API_KEY = "rbx_41d40d6e9de11e967604f8d2675dbbf9fa7cfe31c17ae21a" 
 
 local BASE_URL = "https://api.rblxvalue.com/v2/items/"
 local cache = {}
