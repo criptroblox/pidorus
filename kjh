@@ -1,21 +1,23 @@
 --[[
-    MM2 Trade Scanner (Anti-Crash + Local Database)
+    MM2 Trade Scanner (Local Database via BloxUltra)
+    При первом запуске скачивает все предметы из бесплатного API BloxUltra
+    и сохраняет в файл. Далее работает с локальной базой без задержек.
 --]]
 
 local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
 
--- 🔑 ВАШ НОВЫЙ API-КЛЮЧ (должен быть активен)
-local API_KEY = "rbx_41d40d6e9de11e967604f8d2675dbbf9fa7cfe31c17ae21a"
-local API_BASE = "https://api.rblxvalue.com/v2"
-local DB_FILE = "mm2_items_db.json"
+-- Бесплатный API без ключа и лимитов
+local API_URL = "https://bloxultra.com/api/values/mm2"
+local DB_FILE = "mm2_items_bloxultra.json"
 
 local HttpFn = request or http_request or (syn and syn.request) or (delta and delta.request)
 if not HttpFn then return end
 
 -- ================== ЗАГРУЗКА БАЗЫ ==================
 local function LoadDatabase()
+    -- 1. Пытаемся прочитать локальный файл
     if isfile and isfile(DB_FILE) then
         local success, content = pcall(readfile, DB_FILE)
         if success and content and content ~= "" then
@@ -27,52 +29,52 @@ local function LoadDatabase()
         end
     end
 
-    print("[DB] Загрузка базы с API...")
-    local items = {}
-    local offset = 0
-    local limit = 100
-    local hasMore = true
+    -- 2. Если файла нет — скачиваем с BloxUltra
+    print("[DB] Локальная база не найдена. Загрузка с BloxUltra API...")
+    local res = HttpFn({ Url = API_URL, Method = "GET" })
 
-    while hasMore do
-        local url = string.format("%s/items?limit=%d&offset=%d", API_BASE, limit, offset)
-        local res = HttpFn({ Url = url, Method = "GET", Headers = { ["X-Api-Key"] = API_KEY } })
-
-        if res and res.StatusCode == 200 and res.Body then
-            local ok, json = pcall(function() return HttpService:JSONDecode(res.Body) end)
-            if ok and json and json.items then
-                for _, item in pairs(json.items) do
-                    table.insert(items, {
-                        Name = item.name or "Unknown",
-                        Slug = item.slug or "unknown",
-                        Value = item.value_source_b or item.value or 0,
-                        Stability = item.stability or "Stable"
-                    })
-                end
-                offset = offset + limit
-                hasMore = #json.items == limit
-            else
-                break
+    if res and res.StatusCode == 200 and res.Body then
+        local ok, json = pcall(function() return HttpService:JSONDecode(res.Body) end)
+        if ok and json and json.items then
+            local items = {}
+            for _, item in pairs(json.items) do
+                table.insert(items, {
+                    Name = item.name or "Unknown",
+                    Slug = item.slug or "unknown",
+                    Value = item.value or 0,
+                    Category = item.category or "Unknown",
+                    -- BloxUltra не отдаёт stability напрямую, ставим "Stable"
+                    Stability = "Stable"
+                })
             end
-        else
-            warn("[DB] Ошибка API:", res and res.StatusCode or "Нет ответа")
-            break
-        end
-    end
 
-    if #items > 0 then
-        local success, encoded = pcall(function() return HttpService:JSONEncode(items) end)
-        if success and writefile then writefile(DB_FILE, encoded) end
-        return items
+            -- Сохраняем в файл
+            if #items > 0 then
+                local success, encoded = pcall(function() return HttpService:JSONEncode(items) end)
+                if success and writefile then
+                    writefile(DB_FILE, encoded)
+                    print("[DB] База сохранена в файл. Предметов:", #items)
+                end
+            end
+            return items
+        end
+    else
+        warn("[DB] Ошибка загрузки с BloxUltra:", res and res.StatusCode or "Нет ответа")
     end
     return {}
 end
 
 local ITEM_DB = LoadDatabase()
+
+-- Индекс для быстрого поиска (slug -> item)
 local ITEM_INDEX = {}
 for _, item in pairs(ITEM_DB) do
-    if item.Slug then ITEM_INDEX[string.lower(item.Slug)] = item end
+    if item.Slug then
+        ITEM_INDEX[string.lower(item.Slug)] = item
+    end
 end
 
+-- Поиск предмета по названию (слаг или точное имя)
 local function FindItemByName(name)
     if not name or name == "" then return nil end
     local slug = string.lower(string.gsub(name, "[%s%p]+", "-"))
@@ -117,7 +119,7 @@ end
 local myPanel = CreatePanel("Your Offer", UDim2.new(0.05, 0, 0.12, 0))
 local theirPanel = CreatePanel("Their Offer", UDim2.new(0.55, 0, 0.12, 0))
 
--- ================== ПОИСК ЭЛЕМЕНТОВ ==================
+-- ================== ПОИСК ЭЛЕМЕНТОВ ТРЕЙДА ==================
 local function FindTradeGui(playerGui)
     for _, g in pairs(playerGui:GetChildren()) do
         if g:IsA("ScreenGui") and string.find(string.lower(g.Name), "trade") and g.Enabled then
@@ -136,15 +138,15 @@ local function GetOffers(tradeGui)
     return nil, nil
 end
 
--- 💡 ИСПРАВЛЕНА СТРОКА 167: Теперь он не пытается читать .Text у картинок
+-- Умный поиск названия предмета в слоте
 local function GetSlotName(slot)
     if not slot then return nil end
     for _, v in pairs(slot:GetDescendants()) do
         if (v:IsA("TextLabel") or v:IsA("TextBox")) and v.Text ~= "" then
             local t = v.Text
             -- Игнорируем системный текст и количество (например, "x2")
-            if t ~= "???" and t ~= "Empty" and t ~= "Nothing" 
-               and string.lower(t) ~= "your offer" and string.lower(t) ~= "their offer" 
+            if t ~= "???" and t ~= "Empty" and t ~= "Nothing"
+               and string.lower(t) ~= "your offer" and string.lower(t) ~= "their offer"
                and not t:match("^[xX]?%s*%d+$") then
                 return t
             end
@@ -153,35 +155,40 @@ local function GetSlotName(slot)
     return nil
 end
 
+-- Поиск количества (x5 или просто 5)
+local function GetQuantity(slot)
+    for _, v in pairs(slot:GetDescendants()) do
+        if v:IsA("TextLabel") then
+            local match = v.Text:match("^[xX]?%s*(%d+)$")
+            if match then return tonumber(match) end
+        end
+    end
+    return 1
+end
+
 local function ScanSide(folder, panel, label)
     if not folder then return 0 end
     local total = 0
-    local trendRising, trendDropping = 0, 0
     local foundAny = false
 
     for _, child in pairs(folder:GetDescendants()) do
         if (child:IsA("Frame") or child:IsA("ImageButton")) and child.Visible then
             local ok, itemName = pcall(GetSlotName, child)
             if ok and itemName then
+                local qty = GetQuantity(child)
                 local itemData = FindItemByName(itemName)
                 if itemData then
-                    total = total + itemData.Value
-                    if itemData.Stability == "Rising" then trendRising = trendRising + 1
-                    elseif itemData.Stability == "Dropping" then trendDropping = trendDropping + 1 end
+                    total = total + (itemData.Value * qty)
                     foundAny = true
                 end
             end
         end
     end
 
-    local trendIcon = "➖"
-    if trendRising > trendDropping then trendIcon = "📈"
-    elseif trendDropping > trendRising then trendIcon = "📉" end
-
-    -- 💡 ИСПРАВЛЕНА СТРОКА 227: Проверка на существование panel
     if panel and panel.Parent then
         if foundAny then
-            panel.Text = string.format("%s: %d val %s", label, total, trendIcon)
+            -- BloxUltra не предоставляет тренд, поэтому всегда показываем "Стабилен"
+            panel.Text = string.format("%s: %d val ➖", label, total)
         else
             panel.Text = string.format("%s: 0 val ➖", label)
         end
@@ -194,7 +201,6 @@ task.spawn(function()
     local lastSeen, lastScan = 0, 0
 
     while task.wait(0.2) do
-        -- Защита от вылетов самого цикла
         pcall(function()
             local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
             local tradeGui = playerGui and FindTradeGui(playerGui)
@@ -207,8 +213,7 @@ task.spawn(function()
                 if tick() - lastScan > 1.5 then
                     lastScan = tick()
                     local your, their = GetOffers(tradeGui)
-                    
-                    -- 💡 ИСПРАВЛЕНА СТРОКА 183: Безопасный вызов сканирования
+
                     if your and their then
                         local s1, myTotal = pcall(ScanSide, your, myPanel, "Your Offer")
                         local s2, theirTotal = pcall(ScanSide, their, theirPanel, "Their Offer")
@@ -235,4 +240,4 @@ task.spawn(function()
     end
 end)
 
-print("[MM2 Scanner] Скрипт успешно запущен!")
+print("[MM2 Scanner] Скрипт успешно запущен! База загружена.")
