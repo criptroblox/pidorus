@@ -7,7 +7,7 @@ local Players = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
 
 -- 🔑 ВАШ НОВЫЙ API-КЛЮЧ (должен быть активен)
-local API_KEY = "rbx_ваш_новый_активированный_ключ"
+local API_KEY = "rbx_41d40d6e9de11e967604f8d2675dbbf9fa7cfe31c17ae21a"
 local API_BASE = "https://api.rblxvalue.com/v2"
 local DB_FILE = "mm2_items_db.json"
 
