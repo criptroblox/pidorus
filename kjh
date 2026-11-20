@@ -1,18 +1,17 @@
 --[[
-    MM2 Trade Scanner (Direct MM2Values Parser)
+    MM2 Trade Scanner (Direct MM2Values Parser) - FIXED VERSION
     Напрямую парсит данные с официального сайта mm2values.com
 --]]
 
 local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
-local StarterGui = game:GetService("StarterGui")
 local LocalPlayer = Players.LocalPlayer
 
 local MM2V_URL = "https://mm2values.com/"
 
 local HttpFn = request or http_request or (syn and syn.request) or (delta and delta.request)
 if not HttpFn then 
-    return StarterGui:SetCore("SendNotification", {Title = "Ошибка", Text = "HTTP-функции недоступны.", Duration = 5})
+    return print("[Ошибка] HTTP-функции недоступны в этом исполнителе.")
 end
 
 -- ================== ПАРСИНГ САЙТА MM2VALUES ==================
@@ -37,20 +36,16 @@ local function FetchMM2Values()
 
     -- Парсим таблицу: ищем строки <tr>, внутри которых есть <td> с названием и ценой
     for row in body:gmatch("<tr.-</tr>") do
-        -- Вытаскиваем все ячейки из строки
         local cells = {}
         for cell in row:gmatch("<td[^>]*>(.-)</td>") do
-            -- Очищаем от HTML-тегов и пробелов
             local clean = cell:gsub("<.->", ""):gsub("^%s+", ""):gsub("%s+$", "")
             table.insert(cells, clean)
         end
 
-        -- Обычно: cells[1] = Название, cells[2] = Значение
         if #cells >= 2 then
             local itemName = cells[1]
-            local itemValue = cells[2]:gsub("[^%d]", "") -- оставляем только цифры
+            local itemValue = cells[2]:gsub("[^%d]", "")
             
-            -- Отсеиваем заголовки таблицы ("Item", "Value") и пустые строки
             if itemName ~= "" and itemValue ~= "" and #itemName > 2 then
                 local lowerName = string.lower(itemName)
                 if lowerName ~= "item" and lowerName ~= "name" and lowerName ~= "value" then
@@ -62,6 +57,9 @@ local function FetchMM2Values()
     end
 
     print("[MM2V] Всего предметов успешно загружено:", count)
+    if count == 0 then
+        warn("[MM2V] Внимание! Сайт вернул 0 предметов. Возможно, сработала защита Cloudflare.")
+    end
     return items
 end
 
@@ -72,10 +70,8 @@ local function FindItemValue(itemName)
     if not itemName or itemName == "" then return 0 end
     local cleanName = string.lower(itemName:match("^%s*(.-)%s*$"))
     
-    -- Прямое совпадение
     if VALUE_DB[cleanName] then return VALUE_DB[cleanName] end
     
-    -- Поиск по частичному совпадению
     for dbName, val in pairs(VALUE_DB) do
         if dbName:find(cleanName, 1, true) or cleanName:find(dbName, 1, true) then
             return val
@@ -241,8 +237,15 @@ task.spawn(function()
     end
 end)
 
-StarterGui:SetCore("SendNotification", {
-    Title = "MM2 Scanner",
-    Text = "Скрипт успешно запущен (MM2Values).",
-    Duration = 3
-})
+-- Безопасный вывод уведомления (совместимость с Delta)
+pcall(function()
+    local sg = game:GetService("StarterGui")
+    if sg and sg.SetCore then
+        sg:SetCore("SendNotification", {
+            Title = "MM2 Scanner",
+            Text = "Скрипт успешно запущен!",
+            Duration = 3
+        })
+    end
+end)
+print("[MM2 Scanner] Скрипт успешно запущен! Ожидание открытия трейда.")
