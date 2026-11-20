@@ -1,70 +1,89 @@
 --[[
-    MM2 Trade Scanner (Clean Slate & Strict Mode)
+    MM2 Trade Scanner (Direct MM2Values Parser)
+    Напрямую парсит данные с официального сайта mm2values.com
 --]]
 
 local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
 
--- Бесплатный API без ключа
-local API_URL = "https://bloxultra.com/api/values/mm2"
-local DB_FILE = "mm2_items_bloxultra.json"
+-- Официальный сайт MM2Values
+local MM2V_URL = "https://mm2values.com/"
 
 local HttpFn = request or http_request or (syn and syn.request) or (delta and delta.request)
-if not HttpFn then return end
-
--- ================== ЗАГРУЗКА БАЗЫ ==================
-local function LoadDatabase()
-    if isfile and isfile(DB_FILE) then
-        local success, content = pcall(readfile, DB_FILE)
-        if success and content and content ~= "" then
-            local decodeSuccess, data = pcall(function() return HttpService:JSONDecode(content) end)
-            if decodeSuccess and type(data) == "table" then
-                return data
-            end
-        end
-    end
-
-    print("[DB] Загрузка базы с BloxUltra API...")
-    local res = HttpFn({ Url = API_URL, Method = "GET" })
-    if res and res.StatusCode == 200 and res.Body then
-        local ok, json = pcall(function() return HttpService:JSONDecode(res.Body) end)
-        if ok and json and json.items then
-            local items = {}
-            for _, item in pairs(json.items) do
-                table.insert(items, {
-                    Name = item.name or "Unknown",
-                    Slug = item.slug or "unknown",
-                    Value = item.value or 0,
-                    Stability = "Stable"
-                })
-            end
-            if #items > 0 then
-                local success, encoded = pcall(function() return HttpService:JSONEncode(items) end)
-                if success and writefile then writefile(DB_FILE, encoded) end
-            end
-            return items
-        end
-    end
-    return {}
+if not HttpFn then 
+    return StarterGui:SetCore("SendNotification", {Title = "Ошибка", Text = "HTTP-функции недоступны.", Duration = 5})
 end
 
-local ITEM_DB = LoadDatabase()
-local ITEM_INDEX = {}
-for _, item in pairs(ITEM_DB) do
-    if item.Slug then ITEM_INDEX[string.lower(item.Slug)] = item end
-end
+-- ================== ПАРСИНГ САЙТА MM2VALUES ==================
+local function FetchMM2Values()
+    print("[MM2V] Загрузка актуальных цен с mm2values.com...")
+    local res = HttpFn({
+        Url = MM2V_URL,
+        Method = "GET",
+        Headers = {
+            ["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+    })
 
-local function FindItemByName(name)
-    if not name or name == "" then return nil end
-    local slug = string.lower(string.gsub(name, "[%s%p]+", "-"))
-    if ITEM_INDEX[slug] then return ITEM_INDEX[slug] end
-    for _, item in pairs(ITEM_DB) do
-        if item.Name and string.lower(item.Name) == string.lower(name) then
-            return item
+    if not res or res.StatusCode ~= 200 or not res.Body then
+        warn("[MM2V] Не удалось загрузить сайт. Код:", res and res.StatusCode or "Нет ответа")
+        return {}
+    end
+
+    local items = {}
+    local body = res.Body
+
+    -- Ищем таблицы значений в HTML (обычно предметы лежат в тегах <tr>...</tr>)
+    -- Формат обычно: <td>Название</td>...<td>Значение</td>
+    for name, valStr in body:gmatch('<td[^>]*class="[^"]*item-name[^"]*"[^>]*>(.-)</td>.-<td[^>]*class="[^"]*item-value[^"]*"[^>]*>(.-)</td>') do
+        local cleanName = name:gsub("<.->", ""):gsub("^%s+", ""):gsub("%s+$", "")
+        local cleanVal = valStr:gsub("<.->", ""):gsub("[^%d]", "") -- Оставляем только цифры
+        
+        if cleanName ~= "" and cleanVal ~= "" then
+            items[string.lower(cleanName)] = tonumber(cleanVal) or 0
         end
     end
-    return nil
+
+    -- Резервный парсинг (если классы отличаются)
+    if next(items) == nil then
+        for name, valStr in body:gmatch('<tr.-<td[^>]*>(.-)</td>.-<td[^>]*>(.-)</td>.-</tr>') do
+            local cleanName = name:gsub("<.->", ""):gsub("^%s+", ""):gsub("%s+$", "")
+            -- Проверяем, что это не заголовок таблицы
+            if #cleanName > 2 and not cleanName:lower():find("item") and not cleanName:lower():find("value") then
+                local cleanVal = valStr:gsub("<.->", ""):gsub("[^%d]", "")
+                if cleanVal ~= "" then
+                    items[string.lower(cleanName)] = tonumber(cleanVal) or 0
+                end
+            end
+        end
+    end
+
+    print("[MM2V] Успешно распознано предметов:", ... -- считаем количество
+    local count = 0
+    for _ in pairs(items) do count = count + 1 end
+    print("[MM2V] Всего предметов в базе:", count)
+    
+    return items
+end
+
+-- Загружаем базу один раз при запуске
+local VALUE_DB = FetchMM2Values()
+
+local function FindItemValue(itemName)
+    if not itemName or itemName == "" then return 0 end
+    local cleanName = string.lower(itemName:match("^%s*(.-)%s*$"))
+    
+    -- Прямое совпадение
+    if VALUE_DB[cleanName] then return VALUE_DB[cleanName] end
+    
+    -- Поиск по частичному совпадению (если игра обрезала название)
+    for dbName, val in pairs(VALUE_DB) do
+        if dbName:find(cleanName) or cleanName:find(dbName) then
+            return val
+        end
+    end
+    return 0
 end
 
 -- ================== ИНТЕРФЕЙС ==================
@@ -73,6 +92,9 @@ local function GetSafeGuiParent()
     if ok and hui then return hui end
     return LocalPlayer:WaitForChild("PlayerGui")
 end
+
+local oldGui = GetSafeGuiParent():FindFirstChild("MM2_TradeScanner")
+if oldGui then oldGui:Destroy() end
 
 local gui = Instance.new("ScreenGui")
 gui.Name = "MM2_TradeScanner"
@@ -87,7 +109,7 @@ local function CreatePanel(name, pos)
     p.TextColor3 = Color3.fromRGB(255, 255, 255)
     p.Font = Enum.Font.GothamBold
     p.TextSize = 15
-    p.Text = name .. ": 0 val"
+    p.Text = name .. ": 0 val ➖"
     p.Visible = false
     p.Parent = gui
     local corner = Instance.new("UICorner")
@@ -99,7 +121,7 @@ end
 local myPanel = CreatePanel("Your Offer", UDim2.new(0.05, 0, 0.12, 0))
 local theirPanel = CreatePanel("Their Offer", UDim2.new(0.55, 0, 0.12, 0))
 
--- ================== СТРОГИЙ ПОИСК ЭЛЕМЕНТОВ ==================
+-- ================== СТРОГИЙ ПОИСК СЛОТОВ ==================
 local function FindTradeGui(playerGui)
     for _, g in pairs(playerGui:GetChildren()) do
         if g:IsA("ScreenGui") and string.find(string.lower(g.Name), "trade") and g.Enabled then
@@ -118,18 +140,19 @@ local function GetOffers(tradeGui)
     return nil, nil
 end
 
--- Строгий поиск названия предмета (игнорирует цифры, "Empty", "Slot" и т.д.)
-local function GetSlotName(slot)
+local function GetValidSlotName(slot)
     if not slot then return nil end
     for _, v in pairs(slot:GetDescendants()) do
         if v:IsA("TextLabel") or v:IsA("TextBox") then
             local t = v.Text
             if t and t ~= "" then
-                -- Игнорируем пустые слоты, цифры (количество слотов) и системный текст
-                local isNumber = t:match("^[xX]?%s*%d+$")
-                local isSystem = string.lower(t):find("empty") or string.lower(t):find("slot") or string.lower(t):find("offer") or string.lower(t):find("trade")
+                local lowerT = string.lower(t)
+                local isNumber = t:match("^[xX]?%s*%d+$") or t:match("^%d+%s*/%s*%d+$")
+                local isSystem = lowerT:find("empty") or lowerT:find("slot") or lowerT:find("offer") 
+                              or lowerT:find("add") or lowerT:find("trade") or lowerT:find("nothing") 
+                              or lowerT:find("drag") or lowerT:find("ready")
                 
-                if not isNumber and not isSystem and t ~= "???" and t ~= "Nothing" and #t > 2 then
+                if not isNumber and not isSystem and t ~= "???" and #t > 2 then
                     return t
                 end
             end
@@ -138,59 +161,46 @@ local function GetSlotName(slot)
     return nil
 end
 
--- Подсчет количества (если лежит стак)
-local function GetQuantity(slot)
-    for _, v in pairs(slot:GetDescendants()) do
-        if v:IsA("TextLabel") then
-            local match = v.Text:match("^[xX]?%s*(%d+)$")
-            if match then 
-                local num = tonumber(match)
-                if num > 1 then return num end
-            end
-        end
-    end
-    return 1
-end
-
--- Сканирование с жестким сбросом (Clean Slate)
 local function ScanSide(folder, panel, label)
     if not folder then 
-        if panel and panel.Parent then panel.Text = label .. ": 0 val" end
+        if panel and panel.Parent then panel.Text = label .. ": 0 val ➖" end
         return 0 
     end
 
     local total = 0
-    local foundItems = {}
+    local foundSlots = {} 
 
     for _, child in pairs(folder:GetDescendants()) do
-        -- Ищем только видимые слоты с предметами
-        if (child:IsA("Frame") or child:IsA("ImageButton") or child:IsA("ViewportFrame")) and child.Visible then
-            local ok, itemName = pcall(GetSlotName, child)
-            if ok and itemName then
-                local itemData = FindItemByName(itemName)
-                if itemData then
-                    local qty = GetQuantity(child)
-                    total = total + (itemData.Value * qty)
-                    foundItems[itemName] = true
-                else
-                    -- Если скрипт видит текст, но не находит его в базе, пишем в консоль
-                    if not foundItems[itemName] then
-                        warn("[Неизвестный предмет]:", itemName, "| Проверьте название в базе BloxUltra")
-                        foundItems[itemName] = true
+        if (child:IsA("Frame") or child:IsA("ImageButton")) and child.Visible and not foundSlots[child] then
+            local itemName = GetValidSlotName(child)
+            if itemName then
+                local itemValue = FindItemValue(itemName)
+                if itemValue > 0 then
+                    local qty = 1
+                    for _, txt in pairs(child:GetDescendants()) do
+                        if txt:IsA("TextLabel") then
+                            local num = txt.Text:match("^[xX]?%s*(%d+)$")
+                            if num and tonumber(num) > 1 then
+                                qty = tonumber(num)
+                                break
+                            end
+                        end
                     end
+                    total = total + (itemValue * qty)
+                    foundSlots[child] = true
                 end
             end
         end
     end
 
-    -- Всегда обновляем интерфейс (даже если 0)
+    -- Обновляем текст только если панель существует
     if panel and panel.Parent then
-        panel.Text = string.format("%s: %d val", label, total)
+        panel.Text = string.format("%s: %s val ➖", label, tostring(total))
     end
     return total
 end
 
--- ================== МОНИТОРИНГ ==================
+-- ================== ЦИКЛ МОНИТОРИНГА ==================
 task.spawn(function()
     local lastSeen, lastScan = 0, 0
 
@@ -204,24 +214,23 @@ task.spawn(function()
                 if myPanel then myPanel.Visible = true end
                 if theirPanel then theirPanel.Visible = true end
 
-                if tick() - lastScan > 1.5 then
+                if tick() - lastScan > 1.0 then
                     lastScan = tick()
-                    local your, their = GetOffers(tradeGui)
+                    local yourOffer, theirOffer = GetOffers(tradeGui)
 
-                    if your and their then
-                        -- Оборачиваем в pcall, чтобы не было вылетов
-                        local s1, myTotal = pcall(ScanSide, your, myPanel, "Your Offer")
-                        local s2, theirTotal = pcall(ScanSide, their, theirPanel, "Their Offer")
+                    if yourOffer and theirOffer then
+                        local myTotal = ScanSide(yourOffer, myPanel, "Your Offer")
+                        local theirTotal = ScanSide(theirOffer, theirPanel, "Their Offer")
 
-                        if s1 and s2 and type(myTotal) == "number" and type(theirTotal) == "number" then
-                            if myTotal > theirTotal and theirTotal > 0 then
-                                myPanel.BackgroundColor3 = Color3.fromRGB(40, 120, 40)
-                            elseif theirTotal > myTotal and myTotal > 0 then
-                                theirPanel.BackgroundColor3 = Color3.fromRGB(40, 120, 40)
-                            else
-                                myPanel.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
-                                theirPanel.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
-                            end
+                        if myTotal < theirTotal and theirTotal > 0 then
+                            myPanel.BackgroundColor3 = Color3.fromRGB(40, 120, 40)
+                            theirPanel.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+                        elseif theirTotal < myTotal and myTotal > 0 then
+                            theirPanel.BackgroundColor3 = Color3.fromRGB(40, 120, 40)
+                            myPanel.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+                        else
+                            myPanel.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+                            theirPanel.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
                         end
                     end
                 end
@@ -235,4 +244,4 @@ task.spawn(function()
     end
 end)
 
-print("[MM2 Scanner] Обновленный скрипт запущен!")
+print("[MM2 Scanner] Скрипт успешно запущен! Используются данные MM2Values.")
