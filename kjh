@@ -5,9 +5,9 @@
 
 local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
+local StarterGui = game:GetService("StarterGui")
 local LocalPlayer = Players.LocalPlayer
 
--- Официальный сайт MM2Values
 local MM2V_URL = "https://mm2values.com/"
 
 local HttpFn = request or http_request or (syn and syn.request) or (delta and delta.request)
@@ -33,37 +33,35 @@ local function FetchMM2Values()
 
     local items = {}
     local body = res.Body
+    local count = 0
 
-    -- Ищем таблицы значений в HTML (обычно предметы лежат в тегах <tr>...</tr>)
-    -- Формат обычно: <td>Название</td>...<td>Значение</td>
-    for name, valStr in body:gmatch('<td[^>]*class="[^"]*item-name[^"]*"[^>]*>(.-)</td>.-<td[^>]*class="[^"]*item-value[^"]*"[^>]*>(.-)</td>') do
-        local cleanName = name:gsub("<.->", ""):gsub("^%s+", ""):gsub("%s+$", "")
-        local cleanVal = valStr:gsub("<.->", ""):gsub("[^%d]", "") -- Оставляем только цифры
-        
-        if cleanName ~= "" and cleanVal ~= "" then
-            items[string.lower(cleanName)] = tonumber(cleanVal) or 0
+    -- Парсим таблицу: ищем строки <tr>, внутри которых есть <td> с названием и ценой
+    for row in body:gmatch("<tr.-</tr>") do
+        -- Вытаскиваем все ячейки из строки
+        local cells = {}
+        for cell in row:gmatch("<td[^>]*>(.-)</td>") do
+            -- Очищаем от HTML-тегов и пробелов
+            local clean = cell:gsub("<.->", ""):gsub("^%s+", ""):gsub("%s+$", "")
+            table.insert(cells, clean)
         end
-    end
 
-    -- Резервный парсинг (если классы отличаются)
-    if next(items) == nil then
-        for name, valStr in body:gmatch('<tr.-<td[^>]*>(.-)</td>.-<td[^>]*>(.-)</td>.-</tr>') do
-            local cleanName = name:gsub("<.->", ""):gsub("^%s+", ""):gsub("%s+$", "")
-            -- Проверяем, что это не заголовок таблицы
-            if #cleanName > 2 and not cleanName:lower():find("item") and not cleanName:lower():find("value") then
-                local cleanVal = valStr:gsub("<.->", ""):gsub("[^%d]", "")
-                if cleanVal ~= "" then
-                    items[string.lower(cleanName)] = tonumber(cleanVal) or 0
+        -- Обычно: cells[1] = Название, cells[2] = Значение
+        if #cells >= 2 then
+            local itemName = cells[1]
+            local itemValue = cells[2]:gsub("[^%d]", "") -- оставляем только цифры
+            
+            -- Отсеиваем заголовки таблицы ("Item", "Value") и пустые строки
+            if itemName ~= "" and itemValue ~= "" and #itemName > 2 then
+                local lowerName = string.lower(itemName)
+                if lowerName ~= "item" and lowerName ~= "name" and lowerName ~= "value" then
+                    items[lowerName] = tonumber(itemValue) or 0
+                    count = count + 1
                 end
             end
         end
     end
 
-    print("[MM2V] Успешно распознано предметов:", ... -- считаем количество
-    local count = 0
-    for _ in pairs(items) do count = count + 1 end
-    print("[MM2V] Всего предметов в базе:", count)
-    
+    print("[MM2V] Всего предметов успешно загружено:", count)
     return items
 end
 
@@ -77,9 +75,9 @@ local function FindItemValue(itemName)
     -- Прямое совпадение
     if VALUE_DB[cleanName] then return VALUE_DB[cleanName] end
     
-    -- Поиск по частичному совпадению (если игра обрезала название)
+    -- Поиск по частичному совпадению
     for dbName, val in pairs(VALUE_DB) do
-        if dbName:find(cleanName) or cleanName:find(dbName) then
+        if dbName:find(cleanName, 1, true) or cleanName:find(dbName, 1, true) then
             return val
         end
     end
@@ -193,7 +191,6 @@ local function ScanSide(folder, panel, label)
         end
     end
 
-    -- Обновляем текст только если панель существует
     if panel and panel.Parent then
         panel.Text = string.format("%s: %s val ➖", label, tostring(total))
     end
@@ -244,4 +241,8 @@ task.spawn(function()
     end
 end)
 
-print("[MM2 Scanner] Скрипт успешно запущен! Используются данные MM2Values.")
+StarterGui:SetCore("SendNotification", {
+    Title = "MM2 Scanner",
+    Text = "Скрипт успешно запущен (MM2Values).",
+    Duration = 3
+})
