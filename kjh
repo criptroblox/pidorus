@@ -1,32 +1,246 @@
--- Server Script (в Roblox Studio)
+--[[
+    MM2 Trade Scanner (Local Database Edition)
+    При первом запуске скачивает все предметы из API и сохраняет в файл.
+    Далее работает с локальной базой без задержек.
+--]]
+
 local HttpService = game:GetService("HttpService")
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
 
--- Убедитесь, что ключ активирован и вставлен без пробелов
-local API_KEY = "rbx_41d40d6e9de11e967604f8d2675dbbf9fa7cfe31c17ae21a"
+-- 🔑 ВАШ НОВЫЙ API-КЛЮЧ
+local API_KEY = "rbx_ваш_новый_активированный_ключ"
+local API_BASE = "https://api.rblxvalue.com/v2"
+local DB_FILE = "mm2_items_db.json"
 
-local res = HttpService:RequestAsync({
-    Url = "https://api.rblxvalue.com/v2/items/snowcannon",
-    Method = "GET",
-    Headers = { ["X-Api-Key"] = API_KEY },
-})
+local HttpFn = request or http_request or (syn and syn.request) or (delta and delta.request)
+if not HttpFn then return end
 
-if res.Success then
-    local data = HttpService:JSONDecode(res.Body)
-    local item = data.item
-    
-    -- value_source_b — это цена именно из Supreme Values
-    local supremePrice = item.value_source_b
-    local stability = item.stability -- "Stable", "Rising" и т.д.
-    
-    print(string.format("Предмет: %s", item.name))
-    print(string.format("Цена в Supreme: %s", supremePrice))
-    print(string.format("Тренд: %s", stability))
-    
-    -- Если предмета нет в Supreme, цена будет 0
-    if supremePrice == 0 then
-        print("Внимание: Этот предмет не оценивается в Supreme Values.")
+-- ================== ЗАГРУЗКА БАЗЫ ==================
+local function LoadDatabase()
+    -- Пытаемся прочитать локальный файл
+    if isfile and isfile(DB_FILE) then
+        local success, content = pcall(readfile, DB_FILE)
+        if success and content then
+            local decodeSuccess, data = pcall(function()
+                return HttpService:JSONDecode(content)
+            end)
+            if decodeSuccess and data then
+                print("[DB] База загружена из файла. Предметов:", #data)
+                return data
+            end
+        end
     end
-else
-    -- Выводим код ошибки, если запрос не удался
-    warn("Ошибка API:", res.StatusCode, res.StatusMessage)
+
+    -- Если файла нет или он повреждён — скачиваем с API
+    print("[DB] Локальная база не найдена. Загрузка с API...")
+    local items = {}
+    local offset = 0
+    local limit = 100
+    local hasMore = true
+
+    while hasMore do
+        local url = string.format("%s/items?limit=%d&offset=%d", API_BASE, limit, offset)
+        local res = HttpFn({
+            Url = url,
+            Method = "GET",
+            Headers = { ["X-Api-Key"] = API_KEY }
+        })
+
+        if res and res.StatusCode == 200 and res.Body then
+            local ok, json = pcall(function() return HttpService:JSONDecode(res.Body) end)
+            if ok and json and json.items then
+                for _, item in pairs(json.items) do
+                    table.insert(items, {
+                        Name = item.name,
+                        Slug = item.slug,
+                        Value = item.value_source_b or item.value or 0,
+                        Stability = item.stability or "Stable"
+                    })
+                end
+                offset = offset + limit
+                hasMore = #json.items == limit
+            else
+                warn("[DB] Ошибка декодирования JSON")
+                break
+            end
+        else
+            warn("[DB] Ошибка API:", res and res.StatusCode or "Нет ответа")
+            break
+        end
+    end
+
+    if #items > 0 then
+        local success, encoded = pcall(function()
+            return HttpService:JSONEncode(items)
+        end)
+        if success and writefile then
+            writefile(DB_FILE, encoded)
+            print("[DB] База сохранена в файл. Предметов:", #items)
+        end
+        return items
+    else
+        warn("[DB] Не удалось загрузить ни одного предмета. Проверьте ключ и подключение.")
+        return {}
+    end
 end
+
+-- ================== ПОИСК ПО БАЗЕ ==================
+local ITEM_DB = LoadDatabase()
+
+-- Индекс для быстрого поиска (slug -> item)
+local ITEM_INDEX = {}
+for _, item in pairs(ITEM_DB) do
+    if item.Slug then
+        ITEM_INDEX[string.lower(item.Slug)] = item
+    end
+end
+
+local function FindItemByName(name)
+    if not name or name == "" then return nil end
+    -- 1. По слагу
+    local slug = string.lower(string.gsub(name, "[%s%p]+", "-"))
+    if ITEM_INDEX[slug] then return ITEM_INDEX[slug] end
+    -- 2. По точному имени (регистронезависимо)
+    for _, item in pairs(ITEM_DB) do
+        if string.lower(item.Name) == string.lower(name) then
+            return item
+        end
+    end
+    return nil
+end
+
+-- ================== ИНТЕРФЕЙС ==================
+local function GetSafeGuiParent()
+    local ok, hui = pcall(function() return gethui() end)
+    if ok and hui then return hui end
+    return LocalPlayer:WaitForChild("PlayerGui")
+end
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "MM2_TradeScanner"
+gui.ResetOnSpawn = false
+gui.Parent = GetSafeGuiParent()
+
+local function CreatePanel(name, pos)
+    local p = Instance.new("TextLabel")
+    p.Name = name
+    p.Size = UDim2.new(0, 260, 0, 40)
+    p.Position = pos
+    p.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+    p.TextColor3 = Color3.fromRGB(255, 255, 255)
+    p.Font = Enum.Font.GothamBold
+    p.TextSize = 15
+    p.Text = name .. ": ожидание..."
+    p.Visible = false
+    p.Parent = gui
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 8)
+    corner.Parent = p
+    return p
+end
+
+local myPanel = CreatePanel("Your Offer", UDim2.new(0.05, 0, 0.12, 0))
+local theirPanel = CreatePanel("Their Offer", UDim2.new(0.55, 0, 0.12, 0))
+
+-- ================== ПОИСК ЭЛЕМЕНТОВ ТРЕЙДА ==================
+local function FindTradeGui(playerGui)
+    for _, g in pairs(playerGui:GetChildren()) do
+        if g:IsA("ScreenGui") and string.find(string.lower(g.Name), "trade") and g.Enabled then
+            return g
+        end
+    end
+    return nil
+end
+
+local function GetOffers(tradeGui)
+    local container = tradeGui:FindFirstChild("Container")
+    local trade = container and container:FindFirstChild("Trade")
+    if trade then
+        return trade:FindFirstChild("YourOffer"), trade:FindFirstChild("TheirOffer")
+    end
+    return nil, nil
+end
+
+local function GetSlotName(slot)
+    local lbl = slot:FindFirstChild("ItemName") or slot:FindFirstChildOfClass("TextLabel")
+    if lbl and lbl.Text ~= "" and lbl.Text ~= "???" then
+        return lbl.Text
+    end
+    return nil
+end
+
+-- ================== СКАНИРОВАНИЕ ==================
+local function ScanSide(folder, panel, label)
+    if not folder then return 0, 0, 0 end
+    local total = 0
+    local trendRising = 0
+    local trendDropping = 0
+    local foundAny = false
+
+    for _, child in pairs(folder:GetDescendants()) do
+        if (child:IsA("Frame") or child:IsA("ImageButton")) and child.Visible then
+            local itemName = GetSlotName(child)
+            if itemName then
+                local itemData = FindItemByName(itemName)
+                if itemData then
+                    total = total + itemData.Value
+                    if itemData.Stability == "Rising" then trendRising = trendRising + 1
+                    elseif itemData.Stability == "Dropping" then trendDropping = trendDropping + 1 end
+                    foundAny = true
+                end
+            end
+        end
+    end
+
+    local trendIcon = "➖"
+    if trendRising > trendDropping then trendIcon = "📈"
+    elseif trendDropping > trendRising then trendIcon = "📉" end
+
+    if foundAny then
+        panel.Text = string.format("%s: %d val %s", label, total, trendIcon)
+    else
+        panel.Text = string.format("%s: 0 val ➖", label)
+    end
+    return total, trendRising, trendDropping
+end
+
+-- ================== МОНИТОРИНГ ==================
+task.spawn(function()
+    local lastSeen = 0
+    local lastScan = 0
+
+    while task.wait(0.2) do
+        local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+        local tradeGui = playerGui and FindTradeGui(playerGui)
+
+        if tradeGui then
+            lastSeen = tick()
+            myPanel.Visible = true
+            theirPanel.Visible = true
+
+            if tick() - lastScan > 1.5 then
+                lastScan = tick()
+                local your, their = GetOffers(tradeGui)
+                if your and their then
+                    local myTotal = ScanSide(your, myPanel, "Your Offer")
+                    local theirTotal = ScanSide(their, theirPanel, "Their Offer")
+
+                    if myTotal > theirTotal and theirTotal > 0 then
+                        myPanel.BackgroundColor3 = Color3.fromRGB(40, 120, 40)
+                    elseif theirTotal > myTotal and myTotal > 0 then
+                        theirPanel.BackgroundColor3 = Color3.fromRGB(40, 120, 40)
+                    else
+                        myPanel.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+                        theirPanel.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+                    end
+                end
+            end
+        else
+            if tick() - lastSeen > 2 then
+                myPanel.Visible = false
+                theirPanel.Visible = false
+            end
+        end
+    end
+end)
