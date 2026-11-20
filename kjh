@@ -1,15 +1,13 @@
 --[[
-    MM2 Trade Scanner (Local Database Edition)
-    При первом запуске скачивает все предметы из API и сохраняет в файл.
-    Далее работает с локальной базой без задержек.
+    MM2 Trade Scanner (Anti-Crash + Local Database)
 --]]
 
 local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
 
--- 🔑 ВАШ НОВЫЙ API-КЛЮЧ
-local API_KEY = "rbx_41d40d6e9de11e967604f8d2675dbbf9fa7cfe31c17ae21a"
+-- 🔑 ВАШ НОВЫЙ API-КЛЮЧ (должен быть активен)
+local API_KEY = "rbx_ваш_новый_активированный_ключ"
 local API_BASE = "https://api.rblxvalue.com/v2"
 local DB_FILE = "mm2_items_db.json"
 
@@ -18,22 +16,18 @@ if not HttpFn then return end
 
 -- ================== ЗАГРУЗКА БАЗЫ ==================
 local function LoadDatabase()
-    -- Пытаемся прочитать локальный файл
     if isfile and isfile(DB_FILE) then
         local success, content = pcall(readfile, DB_FILE)
-        if success and content then
-            local decodeSuccess, data = pcall(function()
-                return HttpService:JSONDecode(content)
-            end)
-            if decodeSuccess and data then
+        if success and content and content ~= "" then
+            local decodeSuccess, data = pcall(function() return HttpService:JSONDecode(content) end)
+            if decodeSuccess and type(data) == "table" then
                 print("[DB] База загружена из файла. Предметов:", #data)
                 return data
             end
         end
     end
 
-    -- Если файла нет или он повреждён — скачиваем с API
-    print("[DB] Локальная база не найдена. Загрузка с API...")
+    print("[DB] Загрузка базы с API...")
     local items = {}
     local offset = 0
     local limit = 100
@@ -41,19 +35,15 @@ local function LoadDatabase()
 
     while hasMore do
         local url = string.format("%s/items?limit=%d&offset=%d", API_BASE, limit, offset)
-        local res = HttpFn({
-            Url = url,
-            Method = "GET",
-            Headers = { ["X-Api-Key"] = API_KEY }
-        })
+        local res = HttpFn({ Url = url, Method = "GET", Headers = { ["X-Api-Key"] = API_KEY } })
 
         if res and res.StatusCode == 200 and res.Body then
             local ok, json = pcall(function() return HttpService:JSONDecode(res.Body) end)
             if ok and json and json.items then
                 for _, item in pairs(json.items) do
                     table.insert(items, {
-                        Name = item.name,
-                        Slug = item.slug,
+                        Name = item.name or "Unknown",
+                        Slug = item.slug or "unknown",
                         Value = item.value_source_b or item.value or 0,
                         Stability = item.stability or "Stable"
                     })
@@ -61,7 +51,6 @@ local function LoadDatabase()
                 offset = offset + limit
                 hasMore = #json.items == limit
             else
-                warn("[DB] Ошибка декодирования JSON")
                 break
             end
         else
@@ -71,39 +60,25 @@ local function LoadDatabase()
     end
 
     if #items > 0 then
-        local success, encoded = pcall(function()
-            return HttpService:JSONEncode(items)
-        end)
-        if success and writefile then
-            writefile(DB_FILE, encoded)
-            print("[DB] База сохранена в файл. Предметов:", #items)
-        end
+        local success, encoded = pcall(function() return HttpService:JSONEncode(items) end)
+        if success and writefile then writefile(DB_FILE, encoded) end
         return items
-    else
-        warn("[DB] Не удалось загрузить ни одного предмета. Проверьте ключ и подключение.")
-        return {}
     end
+    return {}
 end
 
--- ================== ПОИСК ПО БАЗЕ ==================
 local ITEM_DB = LoadDatabase()
-
--- Индекс для быстрого поиска (slug -> item)
 local ITEM_INDEX = {}
 for _, item in pairs(ITEM_DB) do
-    if item.Slug then
-        ITEM_INDEX[string.lower(item.Slug)] = item
-    end
+    if item.Slug then ITEM_INDEX[string.lower(item.Slug)] = item end
 end
 
 local function FindItemByName(name)
     if not name or name == "" then return nil end
-    -- 1. По слагу
     local slug = string.lower(string.gsub(name, "[%s%p]+", "-"))
     if ITEM_INDEX[slug] then return ITEM_INDEX[slug] end
-    -- 2. По точному имени (регистронезависимо)
     for _, item in pairs(ITEM_DB) do
-        if string.lower(item.Name) == string.lower(name) then
+        if item.Name and string.lower(item.Name) == string.lower(name) then
             return item
         end
     end
@@ -124,7 +99,6 @@ gui.Parent = GetSafeGuiParent()
 
 local function CreatePanel(name, pos)
     local p = Instance.new("TextLabel")
-    p.Name = name
     p.Size = UDim2.new(0, 260, 0, 40)
     p.Position = pos
     p.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
@@ -143,7 +117,7 @@ end
 local myPanel = CreatePanel("Your Offer", UDim2.new(0.05, 0, 0.12, 0))
 local theirPanel = CreatePanel("Their Offer", UDim2.new(0.55, 0, 0.12, 0))
 
--- ================== ПОИСК ЭЛЕМЕНТОВ ТРЕЙДА ==================
+-- ================== ПОИСК ЭЛЕМЕНТОВ ==================
 local function FindTradeGui(playerGui)
     for _, g in pairs(playerGui:GetChildren()) do
         if g:IsA("ScreenGui") and string.find(string.lower(g.Name), "trade") and g.Enabled then
@@ -162,26 +136,33 @@ local function GetOffers(tradeGui)
     return nil, nil
 end
 
+-- 💡 ИСПРАВЛЕНА СТРОКА 167: Теперь он не пытается читать .Text у картинок
 local function GetSlotName(slot)
-    local lbl = slot:FindFirstChild("ItemName") or slot:FindFirstChildOfClass("TextLabel")
-    if lbl and lbl.Text ~= "" and lbl.Text ~= "???" then
-        return lbl.Text
+    if not slot then return nil end
+    for _, v in pairs(slot:GetDescendants()) do
+        if (v:IsA("TextLabel") or v:IsA("TextBox")) and v.Text ~= "" then
+            local t = v.Text
+            -- Игнорируем системный текст и количество (например, "x2")
+            if t ~= "???" and t ~= "Empty" and t ~= "Nothing" 
+               and string.lower(t) ~= "your offer" and string.lower(t) ~= "their offer" 
+               and not t:match("^[xX]?%s*%d+$") then
+                return t
+            end
+        end
     end
     return nil
 end
 
--- ================== СКАНИРОВАНИЕ ==================
 local function ScanSide(folder, panel, label)
-    if not folder then return 0, 0, 0 end
+    if not folder then return 0 end
     local total = 0
-    local trendRising = 0
-    local trendDropping = 0
+    local trendRising, trendDropping = 0, 0
     local foundAny = false
 
     for _, child in pairs(folder:GetDescendants()) do
         if (child:IsA("Frame") or child:IsA("ImageButton")) and child.Visible then
-            local itemName = GetSlotName(child)
-            if itemName then
+            local ok, itemName = pcall(GetSlotName, child)
+            if ok and itemName then
                 local itemData = FindItemByName(itemName)
                 if itemData then
                     total = total + itemData.Value
@@ -197,50 +178,61 @@ local function ScanSide(folder, panel, label)
     if trendRising > trendDropping then trendIcon = "📈"
     elseif trendDropping > trendRising then trendIcon = "📉" end
 
-    if foundAny then
-        panel.Text = string.format("%s: %d val %s", label, total, trendIcon)
-    else
-        panel.Text = string.format("%s: 0 val ➖", label)
+    -- 💡 ИСПРАВЛЕНА СТРОКА 227: Проверка на существование panel
+    if panel and panel.Parent then
+        if foundAny then
+            panel.Text = string.format("%s: %d val %s", label, total, trendIcon)
+        else
+            panel.Text = string.format("%s: 0 val ➖", label)
+        end
     end
-    return total, trendRising, trendDropping
+    return total
 end
 
 -- ================== МОНИТОРИНГ ==================
 task.spawn(function()
-    local lastSeen = 0
-    local lastScan = 0
+    local lastSeen, lastScan = 0, 0
 
     while task.wait(0.2) do
-        local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
-        local tradeGui = playerGui and FindTradeGui(playerGui)
+        -- Защита от вылетов самого цикла
+        pcall(function()
+            local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+            local tradeGui = playerGui and FindTradeGui(playerGui)
 
-        if tradeGui then
-            lastSeen = tick()
-            myPanel.Visible = true
-            theirPanel.Visible = true
+            if tradeGui then
+                lastSeen = tick()
+                if myPanel then myPanel.Visible = true end
+                if theirPanel then theirPanel.Visible = true end
 
-            if tick() - lastScan > 1.5 then
-                lastScan = tick()
-                local your, their = GetOffers(tradeGui)
-                if your and their then
-                    local myTotal = ScanSide(your, myPanel, "Your Offer")
-                    local theirTotal = ScanSide(their, theirPanel, "Their Offer")
+                if tick() - lastScan > 1.5 then
+                    lastScan = tick()
+                    local your, their = GetOffers(tradeGui)
+                    
+                    -- 💡 ИСПРАВЛЕНА СТРОКА 183: Безопасный вызов сканирования
+                    if your and their then
+                        local s1, myTotal = pcall(ScanSide, your, myPanel, "Your Offer")
+                        local s2, theirTotal = pcall(ScanSide, their, theirPanel, "Their Offer")
 
-                    if myTotal > theirTotal and theirTotal > 0 then
-                        myPanel.BackgroundColor3 = Color3.fromRGB(40, 120, 40)
-                    elseif theirTotal > myTotal and myTotal > 0 then
-                        theirPanel.BackgroundColor3 = Color3.fromRGB(40, 120, 40)
-                    else
-                        myPanel.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
-                        theirPanel.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+                        if s1 and s2 and type(myTotal) == "number" and type(theirTotal) == "number" then
+                            if myTotal > theirTotal and theirTotal > 0 then
+                                myPanel.BackgroundColor3 = Color3.fromRGB(40, 120, 40)
+                            elseif theirTotal > myTotal and myTotal > 0 then
+                                theirPanel.BackgroundColor3 = Color3.fromRGB(40, 120, 40)
+                            else
+                                myPanel.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+                                theirPanel.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+                            end
+                        end
                     end
                 end
+            else
+                if tick() - lastSeen > 2 then
+                    if myPanel then myPanel.Visible = false end
+                    if theirPanel then theirPanel.Visible = false end
+                end
             end
-        else
-            if tick() - lastSeen > 2 then
-                myPanel.Visible = false
-                theirPanel.Visible = false
-            end
-        end
+        end)
     end
 end)
+
+print("[MM2 Scanner] Скрипт успешно запущен!")
