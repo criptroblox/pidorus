@@ -1,101 +1,93 @@
 --[[
-    MM2 Trade Scanner (Direct MM2Values Parser) - FIXED VERSION
-    Напрямую парсит данные с официального сайта mm2values.com
+    MM2 Trade Scanner (BloxUltra API Edition) - FIXED
+    Данные: https://bloxultra.com/api/values/mm2
+    Без ключей и лимитов. База кэшируется локально.
 --]]
 
 local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
 
-local MM2V_URL = "https://mm2values.com/"
+local API_URL = "https://bloxultra.com/api/values/mm2"
+local DB_FILE = "mm2_bloxultra_db.json"
 
 local HttpFn = request or http_request or (syn and syn.request) or (delta and delta.request)
-if not HttpFn then 
-    return print("[Ошибка] HTTP-функции недоступны в этом исполнителе.")
-end
+if not HttpFn then return end
 
--- ================== ПАРСИНГ САЙТА MM2VALUES ==================
-local function FetchMM2Values()
-    print("[MM2V] Загрузка актуальных цен с mm2values.com...")
-    local res = HttpFn({
-        Url = MM2V_URL,
-        Method = "GET",
-        Headers = {
-            ["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
-    })
-
-    if not res or res.StatusCode ~= 200 or not res.Body then
-        warn("[MM2V] Не удалось загрузить сайт. Код:", res and res.StatusCode or "Нет ответа")
-        return {}
-    end
-
-    local items = {}
-    local body = res.Body
-    local count = 0
-
-    -- Парсим таблицу: ищем строки <tr>, внутри которых есть <td> с названием и ценой
-    for row in body:gmatch("<tr.-</tr>") do
-        local cells = {}
-        for cell in row:gmatch("<td[^>]*>(.-)</td>") do
-            local clean = cell:gsub("<.->", ""):gsub("^%s+", ""):gsub("%s+$", "")
-            table.insert(cells, clean)
-        end
-
-        if #cells >= 2 then
-            local itemName = cells[1]
-            local itemValue = cells[2]:gsub("[^%d]", "")
-            
-            if itemName ~= "" and itemValue ~= "" and #itemName > 2 then
-                local lowerName = string.lower(itemName)
-                if lowerName ~= "item" and lowerName ~= "name" and lowerName ~= "value" then
-                    items[lowerName] = tonumber(itemValue) or 0
-                    count = count + 1
-                end
+-- ================== ЗАГРУЗКА БАЗЫ ==================
+local function LoadDatabase()
+    if isfile and isfile(DB_FILE) then
+        local success, content = pcall(readfile, DB_FILE)
+        if success and content and content ~= "" then
+            local decodeSuccess, data = pcall(function() return HttpService:JSONDecode(content) end)
+            if decodeSuccess and type(data) == "table" then
+                print("[DB] База загружена из файла. Предметов:", #data)
+                return data
             end
         end
     end
 
-    print("[MM2V] Всего предметов успешно загружено:", count)
-    if count == 0 then
-        warn("[MM2V] Внимание! Сайт вернул 0 предметов. Возможно, сработала защита Cloudflare.")
+    print("[DB] Загрузка базы с BloxUltra API...")
+    local res = HttpFn({ Url = API_URL, Method = "GET" })
+    if res and res.StatusCode == 200 and res.Body then
+        local ok, json = pcall(function() return HttpService:JSONDecode(res.Body) end)
+        if ok and json and json.items then
+            local items = {}
+            for _, item in pairs(json.items) do
+                table.insert(items, {
+                    Name = item.name or "Unknown",
+                    Slug = item.slug or "unknown",
+                    Value = item.value or 0,
+                    Demand = item.demand or "Medium" -- High, Medium, Low
+                })
+            end
+            if #items > 0 then
+                local success, encoded = pcall(function() return HttpService:JSONEncode(items) end)
+                if success and writefile then writefile(DB_FILE, encoded) end
+                print("[DB] База сохранена. Предметов:", #items)
+            end
+            return items
+        end
+    else
+        warn("[DB] Ошибка API:", res and res.StatusCode or "Нет ответа")
     end
-    return items
+    return {}
 end
 
--- Загружаем базу один раз при запуске
-local VALUE_DB = FetchMM2Values()
+local ITEM_DB = LoadDatabase()
+local ITEM_INDEX = {}
+for _, item in pairs(ITEM_DB) do
+    if item.Slug then ITEM_INDEX[string.lower(item.Slug)] = item end
+end
 
-local function FindItemValue(itemName)
-    if not itemName or itemName == "" then return 0 end
-    local cleanName = string.lower(itemName:match("^%s*(.-)%s*$"))
-    
-    if VALUE_DB[cleanName] then return VALUE_DB[cleanName] end
-    
-    for dbName, val in pairs(VALUE_DB) do
-        if dbName:find(cleanName, 1, true) or cleanName:find(dbName, 1, true) then
-            return val
+local function FindItem(name)
+    if not name or name == "" then return nil end
+    local slug = string.lower(string.gsub(name, "[%s%p]+", "-"))
+    if ITEM_INDEX[slug] then return ITEM_INDEX[slug] end
+    for _, item in pairs(ITEM_DB) do
+        if item.Name and string.lower(item.Name) == string.lower(name) then
+            return item
         end
     end
-    return 0
+    return nil
 end
 
 -- ================== ИНТЕРФЕЙС ==================
-local function GetSafeGuiParent()
+local function GetGuiParent()
     local ok, hui = pcall(function() return gethui() end)
     if ok and hui then return hui end
     return LocalPlayer:WaitForChild("PlayerGui")
 end
 
-local oldGui = GetSafeGuiParent():FindFirstChild("MM2_TradeScanner")
+local oldGui = GetGuiParent():FindFirstChild("MM2_TradeScanner")
 if oldGui then oldGui:Destroy() end
 
 local gui = Instance.new("ScreenGui")
 gui.Name = "MM2_TradeScanner"
 gui.ResetOnSpawn = false
-gui.Parent = GetSafeGuiParent()
+gui.Parent = GetGuiParent()
 
-local function CreatePanel(name, pos)
+local function MakePanel(name, pos)
     local p = Instance.new("TextLabel")
     p.Size = UDim2.new(0, 260, 0, 40)
     p.Position = pos
@@ -106,18 +98,18 @@ local function CreatePanel(name, pos)
     p.Text = name .. ": 0 val ➖"
     p.Visible = false
     p.Parent = gui
-    local corner = Instance.new("UICorner")
-    corner.CornerRadius = UDim.new(0, 8)
-    corner.Parent = p
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, 8)
+    c.Parent = p
     return p
 end
 
-local myPanel = CreatePanel("Your Offer", UDim2.new(0.05, 0, 0.12, 0))
-local theirPanel = CreatePanel("Their Offer", UDim2.new(0.55, 0, 0.12, 0))
+local myPanel = MakePanel("Your Offer", UDim2.new(0.05, 0, 0.12, 0))
+local theirPanel = MakePanel("Their Offer", UDim2.new(0.55, 0, 0.12, 0))
 
--- ================== СТРОГИЙ ПОИСК СЛОТОВ ==================
-local function FindTradeGui(playerGui)
-    for _, g in pairs(playerGui:GetChildren()) do
+-- ================== ПОИСК ТРЕЙДА ==================
+local function FindTradeGui(pg)
+    for _, g in pairs(pg:GetChildren()) do
         if g:IsA("ScreenGui") and string.find(string.lower(g.Name), "trade") and g.Enabled then
             return g
         end
@@ -125,29 +117,29 @@ local function FindTradeGui(playerGui)
     return nil
 end
 
-local function GetOffers(tradeGui)
-    local container = tradeGui:FindFirstChild("Container")
-    local trade = container and container:FindFirstChild("Trade")
-    if trade then
-        return trade:FindFirstChild("YourOffer"), trade:FindFirstChild("TheirOffer")
+local function GetOffers(tg)
+    local c = tg:FindFirstChild("Container")
+    local t = c and c:FindFirstChild("Trade")
+    if t then
+        return t:FindFirstChild("YourOffer"), t:FindFirstChild("TheirOffer")
     end
     return nil, nil
 end
 
-local function GetValidSlotName(slot)
+-- Строгий фильтр: игнорируем числа, слоты и системный текст
+local function GetSlotName(slot)
     if not slot then return nil end
     for _, v in pairs(slot:GetDescendants()) do
         if v:IsA("TextLabel") or v:IsA("TextBox") then
-            local t = v.Text
-            if t and t ~= "" then
-                local lowerT = string.lower(t)
-                local isNumber = t:match("^[xX]?%s*%d+$") or t:match("^%d+%s*/%s*%d+$")
-                local isSystem = lowerT:find("empty") or lowerT:find("slot") or lowerT:find("offer") 
-                              or lowerT:find("add") or lowerT:find("trade") or lowerT:find("nothing") 
-                              or lowerT:find("drag") or lowerT:find("ready")
-                
-                if not isNumber and not isSystem and t ~= "???" and #t > 2 then
-                    return t
+            local txt = v.Text
+            if txt and txt ~= "" then
+                local low = string.lower(txt)
+                local isNum = txt:match("^[xX]?%s*%d+$") or txt:match("^%d+%s*/%s*%d+$")
+                local isSys = low:find("empty") or low:find("slot") or low:find("offer")
+                           or low:find("add") or low:find("trade") or low:find("nothing")
+                           or low:find("drag") or low:find("ready")
+                if not isNum and not isSys and txt ~= "???" and #txt > 2 then
+                    return txt
                 end
             end
         end
@@ -155,65 +147,70 @@ local function GetValidSlotName(slot)
     return nil
 end
 
+-- Сканирование с полным сбросом в 0
 local function ScanSide(folder, panel, label)
-    if not folder then 
-        if panel and panel.Parent then panel.Text = label .. ": 0 val ➖" end
-        return 0 
+    if not folder then
+        if panel then panel.Text = label .. ": 0 val ➖" end
+        return 0
     end
 
     local total = 0
-    local foundSlots = {} 
+    local found = {}
+    local demandRising, demandDropping = 0, 0
 
     for _, child in pairs(folder:GetDescendants()) do
-        if (child:IsA("Frame") or child:IsA("ImageButton")) and child.Visible and not foundSlots[child] then
-            local itemName = GetValidSlotName(child)
+        if (child:IsA("Frame") or child:IsA("ImageButton")) and child.Visible and not found[child] then
+            local itemName = GetSlotName(child)
             if itemName then
-                local itemValue = FindItemValue(itemName)
-                if itemValue > 0 then
+                local data = FindItem(itemName)
+                if data then
                     local qty = 1
-                    for _, txt in pairs(child:GetDescendants()) do
-                        if txt:IsA("TextLabel") then
-                            local num = txt.Text:match("^[xX]?%s*(%d+)$")
-                            if num and tonumber(num) > 1 then
-                                qty = tonumber(num)
-                                break
-                            end
+                    for _, t in pairs(child:GetDescendants()) do
+                        if t:IsA("TextLabel") then
+                            local n = t.Text:match("^[xX]?%s*(%d+)$")
+                            if n and tonumber(n) > 1 then qty = tonumber(n) break end
                         end
                     end
-                    total = total + (itemValue * qty)
-                    foundSlots[child] = true
+                    total = total + (data.Value * qty)
+                    if data.Demand == "High" then demandRising = demandRising + 1
+                    elseif data.Demand == "Low" then demandDropping = demandDropping + 1 end
+                    found[child] = true
                 end
             end
         end
     end
 
-    if panel and panel.Parent then
-        panel.Text = string.format("%s: %s val ➖", label, tostring(total))
+    local icon = "➖"
+    if demandRising > demandDropping then icon = "📈"
+    elseif demandDropping > demandRising then icon = "📉" end
+
+    if panel then
+        panel.Text = string.format("%s: %d val %s", label, total, icon)
     end
     return total
 end
 
--- ================== ЦИКЛ МОНИТОРИНГА ==================
+-- ================== МОНИТОРИНГ ==================
 task.spawn(function()
     local lastSeen, lastScan = 0, 0
 
     while task.wait(0.2) do
         pcall(function()
-            local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
-            local tradeGui = playerGui and FindTradeGui(playerGui)
+            local pg = LocalPlayer:FindFirstChild("PlayerGui")
+            local tg = pg and FindTradeGui(pg)
 
-            if tradeGui then
+            if tg then
                 lastSeen = tick()
-                if myPanel then myPanel.Visible = true end
-                if theirPanel then theirPanel.Visible = true end
+                myPanel.Visible = true
+                theirPanel.Visible = true
 
                 if tick() - lastScan > 1.0 then
                     lastScan = tick()
-                    local yourOffer, theirOffer = GetOffers(tradeGui)
+                    local myOff, theirOff = GetOffers(tg)
 
-                    if yourOffer and theirOffer then
-                        local myTotal = ScanSide(yourOffer, myPanel, "Your Offer")
-                        local theirTotal = ScanSide(theirOffer, theirPanel, "Their Offer")
+                    if myOff and theirOff then
+                        local myTotal = ScanSide(myOff, myPanel, "Your Offer")
+                        local theirTotal = ScanSide(theirOff, theirPanel, "Their Offer")
 
                         if myTotal < theirTotal and theirTotal > 0 then
                             myPanel.BackgroundColor3 = Color3.fromRGB(40, 120, 40)
@@ -229,23 +226,17 @@ task.spawn(function()
                 end
             else
                 if tick() - lastSeen > 2 then
-                    if myPanel then myPanel.Visible = false end
-                    if theirPanel then theirPanel.Visible = false end
+                    myPanel.Visible = false
+                    theirPanel.Visible = false
                 end
             end
         end)
     end
 end)
 
--- Безопасный вывод уведомления (совместимость с Delta)
 pcall(function()
     local sg = game:GetService("StarterGui")
     if sg and sg.SetCore then
-        sg:SetCore("SendNotification", {
-            Title = "MM2 Scanner",
-            Text = "Скрипт успешно запущен!",
-            Duration = 3
-        })
+        sg:SetCore("SendNotification", {Title = "MM2 Scanner", Text = "Данные BloxUltra загружены!", Duration = 3})
     end
 end)
-print("[MM2 Scanner] Скрипт успешно запущен! Ожидание открытия трейда.")
